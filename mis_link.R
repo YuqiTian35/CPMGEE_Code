@@ -1,0 +1,104 @@
+#### the primary setting (alpha=0.7) ####
+# section 4.1
+
+library(diagonals)
+library(Rcpp)
+library(RcppArmadillo)
+library(RcppEigen)
+library(repolr)
+library(rms)
+library(Matrix)
+library(tidyverse)
+library(rlist)
+library(SimCorMultRes)
+library(geepack)
+library(cpmgee)
+
+# data generation for normal residuals
+rcont.clm <- function(clsize = clsize,  # cluster size
+                      betas = betas, # nolint
+                      xformula = formula(xdata),
+                      xdata = parent.frame(),
+                      cor.matrix = cor.matrix){
+  # beta*x
+  xmat <- model.matrix(xformula, data = xdata)[,-1]
+  linear_predictor <- matrix(xmat %*% betas,
+                             ncol = clsize, byrow=TRUE) # changed from cluster_size to clsize
+  
+  
+  sample_size <- nrow(linear_predictor)
+  
+  # e
+  distr <- 'qnorm' # logit link
+  simulated_latent_variables <- rnorta(
+    sample_size, cor.matrix, rep(distr, nrow(cor.matrix))
+  )
+  
+  # y
+  y <- c(t(simulated_latent_variables + linear_predictor)) # might be + in our case
+  
+  # data
+  id <- rep(1:sample_size, each = clsize)
+  time <- rep(1:clsize, sample_size)
+  sim_model_frame <- model.frame(formula = xformula, 
+                                 data = xdata)
+  
+  simdata <- data.frame(y, sim_model_frame, id, time)
+  
+  return(list(simdata=simdata, latent=simulated_latent_variables))
+}
+
+sample_size <- 1000
+cluster_size <- 6
+
+# beta
+beta_coefficients <- c(1, 1)
+# covariate
+x <- rep(rnorm(sample_size), each = cluster_size) # time-invariant
+t <- rep(seq(0, 1, 0.2), sample_size)
+
+# latent correlation matrix for the NORTA method
+latent_correlation_matrix <- matrix(0.7, nrow=cluster_size, ncol=cluster_size)
+diag(latent_correlation_matrix) <- 1
+
+data <- simulated_cont_data$simdata %>% mutate(y = qchisq(pnorm(y/2), 5)) %>% mcar
+data <- data %>% binning(k=300)
+
+# simulation of ordinal responses
+simulated_cont_data <- rcont.clm(clsize = cluster_size, 
+                                 betas = beta_coefficients, 
+                                 xformula = ~ x + t, 
+                                 cor.matrix = latent_correlation_matrix)
+
+# CPM exchangeable
+mod_cpm_ex <- cpmgee(formula = yc ~ x + t,
+                     data = data,
+                     categories = length(unique(data$y)),
+                     subjects = 'id',
+                     initial = 'orm',
+                     times = 1:6,
+                     corr.mod = 'uniform',
+                     alpha = 0.5)
+
+# CPM independence
+mod_cpm_ind <- orm(y_cont ~ x + t, data = data, x=T, y=T)
+mod_cpm_ind <- robcov_fast(fit = mod_cpm_ind, cluster= data$id)
+
+# GEE - exchangeable
+mod_gee_ex <- geeglm(2*qnorm(pchisq(y_cont, 5)) ~ x + t, 
+                     data = data, id = data$id, corstr = 'exchangeable')
+
+
+# new data
+new.data <- data.frame(x=c(0, 1), t=0.2)
+
+# conditional metrics for CPM exchangeable
+cond_mean_ex <- mean.cpmgee(mod_cpm_ex, data$y, new.data)
+cond_median_ex <- quantile.cpmgee(mod_cpm_ex, data$y, new.data, probs = 0.5)
+cond_cdf_ex <- cdf.cpmgee(mod_cpm_ex, data$y, new.data, at.y=5)
+
+# conditional metrics for CPM independence
+cond_mean_ind <- mean.cpmgee(mod_cpm_ind, data$y, new.data)
+cond_median_ind <- quantile.cpmgee(mod_cpm_ind, data$y, new.data, probs = 0.5)
+cond_cdf_ind <- cdf.cpmgee(mod_cpm_ind, data$y,new.data, at.y = 5)
+
